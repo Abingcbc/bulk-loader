@@ -35,13 +35,14 @@ type Config struct {
 type BulkLoader struct {
 	SortConcurrency int `toml:"sort-concurrency" json:"sort-concurrency"`
 	IOConcurrency   int `toml:"io-concurrency" json:"io-concurrency"`
+	MaxBatchSize    int `toml:"max-batch-size" json:"max-batch-size"`
 }
 
 func NewConfig() *Config {
 	return &Config{
 		App: BulkLoader{},
 		Mydumper: brconfig.MydumperRuntime{
-			ReadBlockSize: ReadBlockSize,
+			ReadBlockSize: brconfig.ReadBlockSize,
 			CSV: brconfig.CSVConfig{
 				Separator:       ",",
 				Delimiter:       `"`,
@@ -52,7 +53,7 @@ func NewConfig() *Config {
 				TrimLastSep:     false,
 			},
 			StrictFormat:  false,
-			MaxRegionSize: MaxRegionSize,
+			MaxRegionSize: brconfig.MaxRegionSize,
 			Filter:        DefaultFilter,
 			NoSchema:      true,
 		},

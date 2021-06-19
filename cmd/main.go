@@ -8,5 +8,5 @@ import (
 
 func main() {
 	cfg := config.Must(config.LoadConfig(os.Args[1:], nil))
-	local.Run(cfg)
+	local.Sort(cfg)
 }
