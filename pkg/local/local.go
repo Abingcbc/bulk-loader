@@ -1,6 +1,7 @@
 package local
 
 import (
+	"bulkloader/pkg/common"
 	"bulkloader/pkg/config"
 	"context"
 	"fmt"
@@ -17,11 +18,6 @@ type task struct {
 	filePath string
 }
 
-type kv struct {
-	key   []byte
-	value []byte
-}
-
 func Sort(cfg *config.Config) {
 	ctx := context.Background()
 	taskCh := make(chan task, cfg.App.SortConcurrency)
@@ -32,7 +28,7 @@ func Sort(cfg *config.Config) {
 	for i := 0; i < cfg.App.SortConcurrency; i++ {
 		go func() {
 			// TODO: the size of channel depends on the speed of read file and pebble batch write
-			batchCh := make(chan []kv, 4)
+			batchCh := make(chan []common.KvPair, 4)
 			defer close(batchCh)
 			sortCompleteCh := make(chan struct{})
 
@@ -64,7 +60,7 @@ func Sort(cfg *config.Config) {
 					worker.NewPool(ctx, cfg.App.IOConcurrency, "io"), cfg.Mydumper.CSV.Header)
 
 				readLoop(cfg, parser, batchCh)
-				batchCh <- make([]kv, 0)
+				batchCh <- make([]common.KvPair, 0)
 				// wait for sorting completed
 				<-sortCompleteCh
 				w.Done()
@@ -81,20 +77,20 @@ func Sort(cfg *config.Config) {
 
 }
 
-func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan []kv) {
+func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan []common.KvPair) {
 	readEOF := false
 	for !readEOF {
 		canDeliver := false
-		batch := make([]kv, 0, cfg.App.MaxBatchSize)
+		batch := make([]common.KvPair, 0, cfg.App.MaxBatchSize)
 		for !canDeliver {
 			err := parser.ReadRow()
 			if errors.Cause(err) == io.EOF {
 				readEOF = true
 				break
 			}
-			batch = append(batch, kv{
-				key:   parser.LastRow().Row[0].GetBytes(),
-				value: parser.LastRow().Row[1].GetBytes(),
+			batch = append(batch, common.KvPair{
+				Key:   parser.LastRow().Row[0].GetBytes(),
+				Value: parser.LastRow().Row[1].GetBytes(),
 			})
 			if len(batch) >= cfg.App.MaxBatchSize {
 				canDeliver = true
