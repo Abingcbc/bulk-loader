@@ -4,9 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
+	"github.com/pingcap/br/pkg/lightning/common"
 	brconfig "github.com/pingcap/br/pkg/lightning/config"
 	"github.com/pingcap/errors"
 )
@@ -26,8 +29,11 @@ var (
 
 // Config defines all configurations of a importing task.
 type Config struct {
-	App      BulkLoader               `toml:"bulkloader" json:"bulkloader"`
-	Mydumper brconfig.MydumperRuntime `toml:"mydumper" json:"mydumper"`
+	App          BulkLoader               `toml:"bulkloader" json:"bulkloader"`
+	Mydumper     brconfig.MydumperRuntime `toml:"mydumper" json:"mydumper"`
+	TiDB         brconfig.DBStore         `toml:"tidb" json:"tidb"`
+	Security     *brconfig.Security       `toml:"security" json:"security"`
+	TikvImporter brconfig.TikvImporter    `toml:"tikv-importer" json:"tikv-importer"`
 
 	ConfigFileContent []byte
 }
@@ -36,6 +42,8 @@ type BulkLoader struct {
 	SortConcurrency int `toml:"sort-concurrency" json:"sort-concurrency"`
 	IOConcurrency   int `toml:"io-concurrency" json:"io-concurrency"`
 	MaxBatchSize    int `toml:"max-batch-size" json:"max-batch-size"`
+
+	SortedKVDir string `toml:"sorted-kv-dir" json:"sorted-kv-dir"`
 }
 
 func NewConfig() *Config {
@@ -57,6 +65,12 @@ func NewConfig() *Config {
 			Filter:        DefaultFilter,
 			NoSchema:      true,
 		},
+		TikvImporter: brconfig.TikvImporter{
+			MaxKVPairs:       4096,
+			SendKVPairs:      32768,
+			RangeConcurrency: 16,
+		},
+		Security: &brconfig.Security{},
 	}
 }
 
@@ -106,4 +120,10 @@ func LoadConfig(args []string, extraFlags func(*flag.FlagSet)) (*Config, error) 
 	}
 
 	return cfg, nil
+}
+
+func (cfg *Config) ToTLS() (*common.TLS, error) {
+	fmt.Println(cfg.Security.CAPath)
+	hostPort := net.JoinHostPort(cfg.TiDB.Host, strconv.Itoa(cfg.TiDB.StatusPort))
+	return common.NewTLS(cfg.Security.CAPath, cfg.Security.CertPath, cfg.Security.KeyPath, hostPort)
 }

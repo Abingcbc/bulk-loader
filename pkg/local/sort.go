@@ -26,8 +26,12 @@ func NewLocalSorter(ctx context.Context, cfg *config.Config) (*Sorter, error) {
 		maxOpenFiles = math.MaxInt32
 	}
 
-	localBackend, err := brlocal.NewLocalBackend(ctx, nil, "", nil,
-		false, nil, maxOpenFiles)
+	tls, err := cfg.ToTLS()
+	if err != nil {
+		return nil, err
+	}
+	localBackend, err := brlocal.NewLocalBackend(ctx, tls, cfg.TiDB.PdAddr, &cfg.TikvImporter,
+		true, nil, maxOpenFiles)
 	if err != nil {
 		return nil, errors.Annotate(err, "build local backend failed")
 	}

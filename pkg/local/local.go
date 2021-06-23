@@ -1,13 +1,15 @@
 package local
 
 import (
-	"bulkloader/pkg/common"
 	"bulkloader/pkg/config"
 	"context"
 	"fmt"
 	"io"
 	"sync"
 
+	"github.com/pingcap/br/pkg/lightning/backend"
+	"github.com/pingcap/br/pkg/lightning/backend/kv"
+	"github.com/pingcap/br/pkg/lightning/common"
 	"github.com/pingcap/br/pkg/lightning/mydump"
 	"github.com/pingcap/br/pkg/lightning/worker"
 	"github.com/pingcap/br/pkg/storage"
@@ -15,7 +17,13 @@ import (
 )
 
 type task struct {
+	taskID   int32
 	filePath string
+}
+
+type batch struct {
+	writer *backend.LocalEngineWriter
+	kvs    []common.KvPair
 }
 
 func Sort(cfg *config.Config) {
@@ -24,43 +32,54 @@ func Sort(cfg *config.Config) {
 	defer close(taskCh)
 
 	w := &sync.WaitGroup{}
+	store, err := storage.NewLocalStorage(cfg.Mydumper.SourceDir)
+	sorter, err := NewLocalSorter(ctx, cfg)
+	if err != nil {
+		return
+	}
 
 	for i := 0; i < cfg.App.SortConcurrency; i++ {
 		go func() {
-			// TODO: the size of channel depends on the speed of read file and pebble batch write
-			batchCh := make(chan []common.KvPair, 4)
+			// TODO: the size of channel depends on the speed of read file and sst file write
+			batchCh := make(chan batch, 4)
 			defer close(batchCh)
 			sortCompleteCh := make(chan struct{})
 
 			// multiple tasks can reuse one goroutine
 			go func() {
-				for batch := range batchCh {
-					if len(batch) == 0 {
+				for b := range batchCh {
+					if len(b.kvs) == 0 {
+						// One task completed
+						sortCompleteCh <- struct{}{}
+						continue
+					}
+					b.writer.WriteRows(ctx, []string{"key", "val"}, kv.MakeRowsFromKvPairs(b.kvs))
+					if err != nil {
 						return
 					}
-					fmt.Println(batch)
-					// One task completed
-					sortCompleteCh <- struct{}{}
 				}
 			}()
 
 			for task := range taskCh {
-				s, err := storage.NewLocalStorage(cfg.Mydumper.SourceDir)
+				reader, err := store.Open(ctx, task.filePath)
 				if err != nil {
 					fmt.Println(err.Error())
 					return
 				}
 
-				reader, err := s.Open(ctx, task.filePath)
 				if err != nil {
-					fmt.Println(err.Error())
 					return
 				}
 				parser := mydump.NewCSVParser(&cfg.Mydumper.CSV, reader, int64(cfg.Mydumper.ReadBlockSize),
 					worker.NewPool(ctx, cfg.App.IOConcurrency, "io"), cfg.Mydumper.CSV.Header)
+				writer, err := sorter.NewWriter(ctx, task.taskID)
 
-				readLoop(cfg, parser, batchCh)
-				batchCh <- make([]common.KvPair, 0)
+				readLoop(cfg, parser, batchCh, writer)
+
+				// no more batch for this task
+				batchCh <- batch{
+					kvs: make([]common.KvPair, 0),
+				}
 				// wait for sorting completed
 				<-sortCompleteCh
 				w.Done()
@@ -68,36 +87,48 @@ func Sort(cfg *config.Config) {
 		}()
 	}
 
-	w.Add(1)
-	taskCh <- task{
-		filePath: "test.csv",
+	currentTaskID := 0
+	err = store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
+		w.Add(1)
+		taskCh <- task{
+			taskID:   int32(currentTaskID),
+			filePath: path,
+		}
+		currentTaskID++
+		return nil
+	})
+	if err != nil {
+		return
 	}
 
 	w.Wait()
 
 }
 
-func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan []common.KvPair) {
+func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan batch, writer *backend.LocalEngineWriter) {
 	readEOF := false
 	for !readEOF {
 		canDeliver := false
-		batch := make([]common.KvPair, 0, cfg.App.MaxBatchSize)
+		b := batch{
+			writer: writer,
+			kvs:    make([]common.KvPair, cfg.App.MaxBatchSize),
+		}
 		for !canDeliver {
 			err := parser.ReadRow()
 			if errors.Cause(err) == io.EOF {
 				readEOF = true
 				break
 			}
-			batch = append(batch, common.KvPair{
-				Key:   parser.LastRow().Row[0].GetBytes(),
-				Value: parser.LastRow().Row[1].GetBytes(),
+			b.kvs = append(b.kvs, common.KvPair{
+				Key: parser.LastRow().Row[0].GetBytes(),
+				Val: parser.LastRow().Row[1].GetBytes(),
 			})
-			if len(batch) >= cfg.App.MaxBatchSize {
+			if len(b.kvs) >= cfg.App.MaxBatchSize {
 				canDeliver = true
 			}
 		}
-		if len(batch) > 0 {
-			batchCh <- batch
+		if len(b.kvs) > 0 {
+			batchCh <- b
 		}
 	}
 }
