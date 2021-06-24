@@ -3,7 +3,6 @@ package local
 import (
 	"bulkloader/pkg/config"
 	"context"
-	"fmt"
 	"io"
 	"sync"
 
@@ -30,9 +29,31 @@ func Sort(cfg *config.Config) {
 	ctx := context.Background()
 	taskCh := make(chan task, cfg.App.SortConcurrency)
 	defer close(taskCh)
+	store, err := storage.NewLocalStorage(cfg.Mydumper.SourceDir)
+	if err != nil {
+		return
+	}
 
 	w := &sync.WaitGroup{}
-	store, err := storage.NewLocalStorage(cfg.Mydumper.SourceDir)
+
+	restore(ctx, cfg, store, taskCh, w)
+
+	currentTaskID := 0
+	err = store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
+		w.Add(1)
+		taskCh <- task{
+			taskID:   int32(currentTaskID),
+			filePath: path,
+		}
+		currentTaskID++
+		return nil
+	})
+
+	w.Wait()
+
+}
+
+func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorage, taskCh chan task, w *sync.WaitGroup) {
 	sorter, err := NewLocalSorter(ctx, cfg)
 	if err != nil {
 		return
@@ -63,11 +84,6 @@ func Sort(cfg *config.Config) {
 			for task := range taskCh {
 				reader, err := store.Open(ctx, task.filePath)
 				if err != nil {
-					fmt.Println(err.Error())
-					return
-				}
-
-				if err != nil {
 					return
 				}
 				parser := mydump.NewCSVParser(&cfg.Mydumper.CSV, reader, int64(cfg.Mydumper.ReadBlockSize),
@@ -86,23 +102,6 @@ func Sort(cfg *config.Config) {
 			}
 		}()
 	}
-
-	currentTaskID := 0
-	err = store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
-		w.Add(1)
-		taskCh <- task{
-			taskID:   int32(currentTaskID),
-			filePath: path,
-		}
-		currentTaskID++
-		return nil
-	})
-	if err != nil {
-		return
-	}
-
-	w.Wait()
-
 }
 
 func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan batch, writer *backend.LocalEngineWriter) {
