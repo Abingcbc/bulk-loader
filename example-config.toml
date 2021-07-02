@@ -1,0 +1,18 @@
+[bulkloader]
+sort-concurrency = 1
+io-concurrency = 1
+
+[mydumper]
+data-source-dir = ""
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = ""
+
+[tidb]
+host = "127.0.0.1"
+port = 4000
+user = "root"
+password = ""
+status-port = 10080
+pd-addr = "127.0.0.1:2379"
