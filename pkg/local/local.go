@@ -3,9 +3,12 @@ package local
 import (
 	"bulkloader/pkg/config"
 	"context"
+	"fmt"
 	"io"
+	"path"
 	"sync"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/pingcap/br/pkg/lightning/backend"
 	"github.com/pingcap/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/br/pkg/lightning/common"
@@ -36,27 +39,31 @@ func Sort(cfg *config.Config) {
 
 	w := &sync.WaitGroup{}
 
-	restore(ctx, cfg, store, taskCh, w)
+	sorter := restore(ctx, cfg, store, taskCh, w)
 
-	currentTaskID := 0
+	if err != nil {
+		return
+	}
 	err = store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
 		w.Add(1)
 		taskCh <- task{
-			taskID:   int32(currentTaskID),
+			taskID:   int32(cfg.App.SortedKVID),
 			filePath: path,
 		}
-		currentTaskID++
 		return nil
 	})
 
 	w.Wait()
+	sorter.Close(ctx, cfg.App.SortedKVID)
+
+	sendLoop(cfg)
 
 }
 
-func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorage, taskCh chan task, w *sync.WaitGroup) {
+func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorage, taskCh chan task, w *sync.WaitGroup) *Sorter {
 	sorter, err := NewLocalSorter(ctx, cfg)
 	if err != nil {
-		return
+		return nil
 	}
 
 	for i := 0; i < cfg.App.SortConcurrency; i++ {
@@ -102,6 +109,8 @@ func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorag
 			}
 		}()
 	}
+
+	return sorter
 }
 
 func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan batch, writer *backend.LocalEngineWriter) {
@@ -129,5 +138,24 @@ func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan batch, 
 		if len(b.kvs) > 0 {
 			batchCh <- b
 		}
+	}
+}
+
+func sendLoop(cfg *config.Config) {
+	_, sortedKVUUID := backend.MakeUUID("", cfg.App.SortedKVID)
+	db, err := pebble.Open(path.Join(cfg.TikvImporter.SortedKVDir, sortedKVUUID.String()), &pebble.Options{})
+	if err != nil {
+		return
+	}
+	iter := db.NewIter(nil)
+	for iter.First(); iter.Valid(); iter.Next() {
+		fmt.Println(string(iter.Key()))
+		fmt.Println(string(iter.Value()))
+	}
+	if err := iter.Close(); err != nil {
+		return
+	}
+	if err := db.Close(); err != nil {
+		return
 	}
 }
