@@ -42,6 +42,7 @@ type Config struct {
 type BulkLoader struct {
 	SortConcurrency int `toml:"sort-concurrency" json:"sort-concurrency"`
 	IOConcurrency   int `toml:"io-concurrency" json:"io-concurrency"`
+	PutConcurrency  int `toml:"put-concurrency" json:"put-concurrency"`
 	MaxBatchSize    int `toml:"max-batch-size" json:"max-batch-size"`
 
 	SortedKVID int32 `toml:"sorted-kv-id" json:"sorted-kv-id"`
@@ -54,7 +55,11 @@ func NewConfig() *Config {
 	}
 	return &Config{
 		App: BulkLoader{
-			SortedKVID: int32(defaultSortedKVID.ID()),
+			SortConcurrency: 1,
+			IOConcurrency:   1,
+			PutConcurrency:  1,
+			SortedKVID:      int32(defaultSortedKVID.ID()),
+			MaxBatchSize:    32,
 		},
 		Mydumper: brconfig.MydumperRuntime{
 			ReadBlockSize: brconfig.ReadBlockSize,

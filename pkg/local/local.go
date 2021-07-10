@@ -3,7 +3,6 @@ package local
 import (
 	"bulkloader/pkg/config"
 	"context"
-	"fmt"
 	"io"
 	"path"
 	"sync"
@@ -16,6 +15,8 @@ import (
 	"github.com/pingcap/br/pkg/lightning/worker"
 	"github.com/pingcap/br/pkg/storage"
 	"github.com/pingcap/errors"
+	clientconfig "github.com/tikv/client-go/v2/config"
+	"github.com/tikv/client-go/v2/tikv"
 )
 
 type task struct {
@@ -23,9 +24,14 @@ type task struct {
 	filePath string
 }
 
-type batch struct {
+type sortBatch struct {
 	writer *backend.LocalEngineWriter
 	kvs    []common.KvPair
+}
+
+type putBatch struct {
+	Keys [][]byte
+	Vals [][]byte
 }
 
 func Sort(cfg *config.Config) {
@@ -55,9 +61,7 @@ func Sort(cfg *config.Config) {
 
 	w.Wait()
 	sorter.Close(ctx, cfg.App.SortedKVID)
-
-	sendLoop(cfg)
-
+	put(ctx, cfg)
 }
 
 func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorage, taskCh chan task, w *sync.WaitGroup) *Sorter {
@@ -69,7 +73,7 @@ func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorag
 	for i := 0; i < cfg.App.SortConcurrency; i++ {
 		go func() {
 			// TODO: the size of channel depends on the speed of read file and sst file write
-			batchCh := make(chan batch, 4)
+			batchCh := make(chan sortBatch, 4)
 			defer close(batchCh)
 			sortCompleteCh := make(chan struct{})
 
@@ -100,7 +104,7 @@ func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorag
 				readLoop(cfg, parser, batchCh, writer)
 
 				// no more batch for this task
-				batchCh <- batch{
+				batchCh <- sortBatch{
 					kvs: make([]common.KvPair, 0),
 				}
 				// wait for sorting completed
@@ -113,13 +117,13 @@ func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorag
 	return sorter
 }
 
-func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan batch, writer *backend.LocalEngineWriter) {
+func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan sortBatch, writer *backend.LocalEngineWriter) {
 	readEOF := false
 	for !readEOF {
 		canDeliver := false
-		b := batch{
+		b := sortBatch{
 			writer: writer,
-			kvs:    make([]common.KvPair, cfg.App.MaxBatchSize),
+			kvs:    make([]common.KvPair, 0),
 		}
 		for !canDeliver {
 			err := parser.ReadRow()
@@ -141,21 +145,70 @@ func readLoop(cfg *config.Config, parser *mydump.CSVParser, batchCh chan batch, 
 	}
 }
 
-func sendLoop(cfg *config.Config) {
+func put(ctx context.Context, cfg *config.Config) {
+	putBatchCh := make(chan putBatch, cfg.App.PutConcurrency)
+	w := &sync.WaitGroup{}
+	for i := 0; i < cfg.App.PutConcurrency; i++ {
+		go func() {
+			w.Add(1)
+			client, err := tikv.NewRawKVClient([]string{cfg.TiDB.PdAddr}, clientconfig.DefaultConfig().Security)
+			defer client.Close()
+			if err != nil {
+				return
+			}
+			for b := range putBatchCh {
+				if len(b.Keys) == 0 {
+					break
+				}
+				client.BatchPut(b.Keys, b.Vals)
+			}
+
+			w.Done()
+		}()
+	}
+
+	sendLoop(cfg, putBatchCh)
+
+	w.Wait()
+}
+
+func sendLoop(cfg *config.Config, putBatchCh chan putBatch) {
 	_, sortedKVUUID := backend.MakeUUID("", cfg.App.SortedKVID)
 	db, err := pebble.Open(path.Join(cfg.TikvImporter.SortedKVDir, sortedKVUUID.String()), &pebble.Options{})
 	if err != nil {
 		return
 	}
-	iter := db.NewIter(nil)
-	for iter.First(); iter.Valid(); iter.Next() {
-		fmt.Println(string(iter.Key()))
-		fmt.Println(string(iter.Value()))
+	var putBatchBuffer putBatch
+
+	iter := db.NewIter(&pebble.IterOptions{})
+	iter.First()
+	// skip metadata
+	iter.Next()
+	// the bottleneck is the network when batch putting, not local reading
+	for ; iter.Valid(); iter.Next() {
+		currentKey := make([]byte, len(iter.Key()))
+		currentVal := make([]byte, len(iter.Value()))
+		copy(currentKey, iter.Key())
+		copy(currentVal, iter.Value())
+
+		putBatchBuffer.Keys = append(putBatchBuffer.Keys, currentKey)
+		putBatchBuffer.Vals = append(putBatchBuffer.Vals, currentVal)
+		if len(putBatchBuffer.Keys) >= 2 {
+			putBatchCh <- putBatchBuffer
+			putBatchBuffer = putBatch{}
+		}
+	}
+	if len(putBatchBuffer.Keys) != 0 {
+		putBatchCh <- putBatchBuffer
 	}
 	if err := iter.Close(); err != nil {
 		return
 	}
 	if err := db.Close(); err != nil {
 		return
+	}
+	// close all batch_put workers by putting empty batch
+	for i := 0; i < cfg.App.PutConcurrency; i++ {
+		putBatchCh <- putBatch{}
 	}
 }

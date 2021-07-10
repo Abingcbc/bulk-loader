@@ -1,6 +1,7 @@
 [bulkloader]
 sort-concurrency = 1
 io-concurrency = 1
+put-concurrency = 1
 
 [mydumper]
 data-source-dir = ""
