@@ -22,6 +22,7 @@ import (
 type task struct {
 	taskID   int32
 	filePath string
+	writer   *backend.LocalEngineWriter
 }
 
 type sortBatch struct {
@@ -52,9 +53,14 @@ func Sort(cfg *config.Config) {
 	}
 	err = store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
 		w.Add(1)
+		writer, err := sorter.NewWriter(ctx, int32(cfg.App.SortedKVID))
+		if err != nil {
+			return err
+		}
 		taskCh <- task{
 			taskID:   int32(cfg.App.SortedKVID),
 			filePath: path,
+			writer:   writer,
 		}
 		return nil
 	})
@@ -99,9 +105,8 @@ func restore(ctx context.Context, cfg *config.Config, store *storage.LocalStorag
 				}
 				parser := mydump.NewCSVParser(&cfg.Mydumper.CSV, reader, int64(cfg.Mydumper.ReadBlockSize),
 					worker.NewPool(ctx, cfg.App.IOConcurrency, "io"), cfg.Mydumper.CSV.Header)
-				writer, err := sorter.NewWriter(ctx, task.taskID)
 
-				readLoop(cfg, parser, batchCh, writer)
+				readLoop(cfg, parser, batchCh, task.writer)
 
 				// no more batch for this task
 				batchCh <- sortBatch{
