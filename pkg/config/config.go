@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/BurntSushi/toml"
+	"github.com/google/uuid"
 	"github.com/pingcap/br/pkg/lightning/common"
 	brconfig "github.com/pingcap/br/pkg/lightning/config"
 	"github.com/pingcap/errors"
@@ -41,14 +42,25 @@ type Config struct {
 type BulkLoader struct {
 	SortConcurrency int `toml:"sort-concurrency" json:"sort-concurrency"`
 	IOConcurrency   int `toml:"io-concurrency" json:"io-concurrency"`
+	PutConcurrency  int `toml:"put-concurrency" json:"put-concurrency"`
 	MaxBatchSize    int `toml:"max-batch-size" json:"max-batch-size"`
 
-	SortedKVDir string `toml:"sorted-kv-dir" json:"sorted-kv-dir"`
+	SortedKVID int32 `toml:"sorted-kv-id" json:"sorted-kv-id"`
 }
 
 func NewConfig() *Config {
+	defaultSortedKVID, err := uuid.NewUUID()
+	if err != nil {
+		return nil
+	}
 	return &Config{
-		App: BulkLoader{},
+		App: BulkLoader{
+			SortConcurrency: 1,
+			IOConcurrency:   1,
+			PutConcurrency:  1,
+			SortedKVID:      int32(defaultSortedKVID.ID()),
+			MaxBatchSize:    32,
+		},
 		Mydumper: brconfig.MydumperRuntime{
 			ReadBlockSize: brconfig.ReadBlockSize,
 			CSV: brconfig.CSVConfig{
